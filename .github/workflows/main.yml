@@ -1,4 +1,4 @@
-name: snck
+name: akash
 
 on:
  workflow_dispatch:
@@ -10,6 +10,7 @@ on:
 
 permissions:
  contents: write
+ actions: write
 
 # Naya run tab tak wait kare jab tak purana run apna Final Save pura na kar le
 concurrency:
@@ -262,7 +263,7 @@ jobs:
      $browsers = @(
       @{ n = "chrome.tgz";  p = @("AppData/Local/Google/Chrome") },
       @{ n = "brave.tgz";   p = @("AppData/Local/BraveSoftware") },
-      @{ n = "shell.tgz";   p = @("AppData/Roaming/Microsoft/Windows/Start Menu", "AppData/Roaming/Microsoft/Windows/Themes", "AppData/Roaming/Microsoft/Windows/SendTo", "AppData/Roaming/Microsoft/Windows/Libraries", "AppData/Roaming/Microsoft/Windows/Templates", "AppData/Roaming/Microsoft/Internet Explorer/Quick Launch") },
+      @{ n = "shell.tgz";   p = @("AppData/Roaming/Microsoft/Windows/Start Menu", "AppData/Roaming/Microsoft/Windows/Themes", "AppData/Roaming/Microsoft/Windows/SendTo", "AppData/Roaming/Microsoft/Windows/Libraries", "AppData/Roaming/Microsoft/Windows/Templates", "AppData/Roaming/Microsoft/Internet Explorer/Quick Launch", "AppData/Roaming/Microsoft/Windows/PowerShell") },
       @{ n = "fonts.tgz";   p = @("AppData/Local/Microsoft/Windows/Fonts") }
      )
      foreach ($b in $browsers) {
@@ -342,6 +343,13 @@ jobs:
       Write-Host "Machine settings restore ho gayi."
      } else { Write-Host "Machine settings abhi tak save nahi hui." }
      exit 0
+  - name: Chrome Login Fix (App-Bound Encryption OFF)
+    run: |
+     $k = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
+     New-Item -Path $k -Force | Out-Null
+     Set-ItemProperty -Path $k -Name ApplicationBoundEncryptionEnabled -Value 0 -Type DWord
+     Write-Host "Chrome ApplicationBoundEncryptionEnabled=0 set (Google login save hoga)"
+     exit 0
   - name: Fresh Windows Cleanup
     run: |
      . "C:\persist-lib.ps1"
@@ -391,22 +399,6 @@ jobs:
      netsh advfirewall firewall add rule name="RDP-Tailscale" `
      dir=in action=allow protocol=TCP localport=3389
      Restart-Service -Name TermService -Force
-  - name: Performance Boost
-    run: |
-     $ErrorActionPreference = "Continue"
-     Write-Host "RAM: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)) GB, CPU cores: $((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors)"
-     try { powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>&1 | Out-Null; Write-Host "High performance power plan on" } catch {}
-     try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Write-Host "Defender realtime off" } catch {}
-     foreach ($svc in "SysMain", "WSearch", "DiagTrack", "wuauserv", "UsoSvc") {
-      try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue; Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
-     }
-     try {
-      Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Force
-      Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -Value 1 -Force
-      Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fEnableVirtualizedGraphics" -Value 1 -Force -ErrorAction SilentlyContinue
-     } catch {}
-     Write-Host "Performance tweaks applied."
-     exit 0
   - name: Create RDP User (snck)
     run: |
      $user = $env:RDP_USER
@@ -543,6 +535,22 @@ jobs:
        Set-ItemProperty -Path $k -Name Wallpaper -Value $wp.FullName
        Set-ItemProperty -Path $k -Name WallpaperStyle -Value $style
        Set-ItemProperty -Path $k -Name TileWallpaper -Value $tile
+       @'
+       $wp = Get-ChildItem "C:\RDPData\wallpaper" -Filter "wall.*" -ErrorAction SilentlyContinue | Select-Object -First 1
+       if (-not $wp) { exit 0 }
+       $style = "10"; $tile = "0"
+       try {
+        $j = Get-Content "C:\RDPData\wallpaper\settings.json" -Raw | ConvertFrom-Json
+        if ($j.style) { $style = "$($j.style)" }
+        if ($j.tile) { $tile = "$($j.tile)" }
+       } catch {}
+       $dk = "HKCU:\Control Panel\Desktop"
+       Set-ItemProperty -Path $dk -Name WallpaperStyle -Value $style
+       Set-ItemProperty -Path $dk -Name TileWallpaper -Value $tile
+       Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class WallApply { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int a, int b, string c, int d); }'
+       [WallApply]::SystemParametersInfo(20, 0, $wp.FullName, 3) | Out-Null
+     '@ | Set-Content -Path "C:\apply-wall.ps1"
+       reg add "HKU\RdpWall\Software\Microsoft\Windows\CurrentVersion\Run" /v ApplyWallpaper /t REG_SZ /d "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\apply-wall.ps1" /f | Out-Null
        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
        Start-Sleep -Seconds 2
        reg unload HKU\RdpWall | Out-Null
@@ -550,63 +558,14 @@ jobs:
       } else { Write-Host "Saved wallpaper abhi nahi hai, skip" }
      } catch { Write-Host "Wallpaper restore fail: $_" }
      exit 0
-  - name: Hide Windows Watermark
-    run: |
-     $ErrorActionPreference = "Continue"
-     try {
-      $sid = (Get-LocalUser -Name $env:RDP_USER).SID.Value
-      $prof = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
-      $hive = "$prof\NTUSER.DAT"
-      if (Test-Path $hive) {
-       reg load HKU\RdpWM "$hive" | Out-Null
-       $k = "Registry::HKEY_USERS\RdpWM\Control Panel\Desktop"
-       Set-ItemProperty -Path $k -Name PaintDesktopVersion -Value 0 -Type DWord
-       [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-       Start-Sleep -Seconds 2
-       reg unload HKU\RdpWM | Out-Null
-       Write-Host "Windows Server version text hide set."
-      }
-     } catch { Write-Host "Watermark hide fail: $_" }
-     # Default profile + .DEFAULT me bhi watermark band (naya user bane to bhi na dikhe)
-     try {
-      reg load HKU\DefWM "C:\Users\Default\NTUSER.DAT" | Out-Null
-      $dk = "Registry::HKEY_USERS\DefWM\Control Panel\Desktop"
-      if (-not (Test-Path $dk)) { New-Item -Path $dk -Force | Out-Null }
-      Set-ItemProperty -Path $dk -Name PaintDesktopVersion -Value 0 -Type DWord
-      [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-      Start-Sleep -Seconds 2
-      reg unload HKU\DefWM | Out-Null
-      Set-ItemProperty -Path "Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop" -Name PaintDesktopVersion -Value 0 -Type DWord -ErrorAction SilentlyContinue
-     } catch { Write-Host "Default watermark hide fail: $_" }
-     # Corner wala Test Mode text band karo (poori tarah reboot ke baad hatta hai) + Server Manager popup band
-     try {
-      bcdedit /set testsigning off | Out-Null
-      bcdedit /set nointegritychecks off | Out-Null
-      New-Item -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Force | Out-Null
-      Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name DoNotOpenServerManagerAtLogon -Value 1 -Type DWord
-     } catch { Write-Host "Test mode/ServerManager fix fail: $_" }
-     # Purana Snck badge agar kahin bacha ho to hata do
-     try {
-      Unregister-ScheduledTask -TaskName "SnckBadgeWatchdog" -Confirm:$false -ErrorAction SilentlyContinue
-      Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "SnckBadge" -ErrorAction SilentlyContinue
-      Remove-Item "C:\ProgramData\snck-badge.ps1","C:\ProgramData\snck-badge.vbs" -Force -ErrorAction SilentlyContinue
-     } catch {}
-     exit 0
   - name: Install Tailscale and Restore Saved Login
     run: |
      $ErrorActionPreference = "Continue"
-     $msi = "$env:TEMP\tailscale.msi"
-     $urls = @("https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi",
-               "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi")
-     foreach ($u in $urls) {
-      for ($t = 0; $t -lt 3 -and -not (Test-Path $msi); $t++) {
-       try { Invoke-WebRequest -Uri $u -OutFile $msi -UseBasicParsing -ErrorAction Stop } catch { Start-Sleep -Seconds 3 }
-      }
-      if (Test-Path $msi) { break }
-     }
-     if (-not (Test-Path $msi)) { Write-Error "Tailscale download fail"; exit 1 }
-     Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/quiet", "/norestart" -Wait
-     Remove-Item $msi -Force -ErrorAction SilentlyContinue
+     $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+     $installerPath = "$env:TEMP\tailscale.msi"
+     Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+     Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+     Remove-Item $installerPath -Force
      for ($i = 0; $i -lt 30; $i++) {
       $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
       if ($svc -and $svc.Status -eq "Running") { break }
@@ -616,9 +575,14 @@ jobs:
      if (Test-Path "$env:TEMP\tailscale-state.tgz") {
       Stop-Service -Name "Tailscale" -Force -ErrorAction SilentlyContinue
       Start-Sleep -Seconds 3
+      New-Item -ItemType Directory -Force -Path "$env:ProgramData" | Out-Null
       & "$env:SystemRoot\System32\tar.exe" -xzf "$env:TEMP\tailscale-state.tgz" -C "$env:ProgramData"
       Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
-      Start-Sleep -Seconds 5
+      for ($i = 0; $i -lt 30; $i++) {
+       $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+       if ($svc -and $svc.Status -eq "Running") { break }
+       Start-Sleep -Seconds 2
+      }
       Write-Host "Purana Tailscale login restore ho gaya."
      } else {
       Write-Host "Pehli baar hai, Tailscale login ek baar karna padega."
@@ -829,5 +793,236 @@ jobs:
      }
      $fd = "$env:TEMP\apps-files-d.tgz"
      Remove-Item $fd -Force -ErrorAction SilentlyContinue
-     if ($ddirs.
-... (11 KB left)
+     if ($ddirs.Count -gt 0) {
+      & $tar -czf $fd -C "D:\" $ddirs
+      if (Test-Path $fd) {
+       $mbd = [math]::Round((Get-Item $fd).Length / 1MB)
+       if ($mbd -gt 1900) { Write-Host "apps-files-d $mbd MB hai, 2 GB limit ke paas, save skip" }
+       else {
+        gh release upload rdp-data $fd --repo $env:GITHUB_REPOSITORY --clobber
+        Write-Host "[$(Get-Date)] D: drive files saved ($mbd MB, $($ddirs.Count) items)"
+       }
+      }
+     }
+     $fm = "$env:TEMP\apps-meta.tgz"
+     Remove-Item $fm -Force -ErrorAction SilentlyContinue
+     & $tar -czf $fm -C $stage .
+     if (Test-Path $fm) {
+      gh release upload rdp-data $fm --repo $env:GITHUB_REPOSITORY --clobber
+      Write-Host "[$(Get-Date)] Installed apps registry/services saved"
+     }
+     Set-Content -Path "C:\apps-sig.txt" -Value $sig -NoNewline
+     exit 0
+     '@ | Set-Content -Path "C:\save-apps.ps1"
+     . "C:\app-lib.ps1"
+     Get-AppState | ConvertTo-Json -Depth 4 -Compress | Set-Content "C:\baseline-apps.json"
+     Write-Host "App baseline le liya."
+     gh release download rdp-data --repo $env:GITHUB_REPOSITORY --pattern apps-files.tgz --dir $env:TEMP --clobber 2>$null
+     if (Test-Path "$env:TEMP\apps-files.tgz") {
+      & $tar -xzf "$env:TEMP\apps-files.tgz" -C "C:\"
+      Write-Host "Installed apps ki files restore ho gayin."
+     } else { Write-Host "Abhi tak koi captured app nahi hai." }
+     gh release download rdp-data --repo $env:GITHUB_REPOSITORY --pattern apps-files-d.tgz --dir $env:TEMP --clobber 2>$null
+     if ((Test-Path "$env:TEMP\apps-files-d.tgz") -and (Test-Path "D:\")) {
+      & $tar -xzf "$env:TEMP\apps-files-d.tgz" -C "D:\"
+      Write-Host "D: drive ki files restore ho gayin."
+     }
+     gh release download rdp-data --repo $env:GITHUB_REPOSITORY --pattern apps-meta.tgz --dir $env:TEMP --clobber 2>$null
+     if (Test-Path "$env:TEMP\apps-meta.tgz") {
+      $m = "$env:TEMP\appmeta"
+      Remove-Item $m -Recurse -Force -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force -Path $m | Out-Null
+      & $tar -xzf "$env:TEMP\apps-meta.tgz" -C $m
+      $toStart = @()
+      if (Test-Path "$m\services.json") {
+       foreach ($s in @(Get-Content "$m\services.json" -Raw | ConvertFrom-Json)) {
+        if (-not $s.Name) { continue }
+        if (-not (Get-Service -Name $s.Name -ErrorAction SilentlyContinue)) {
+         $mode = switch ($s.StartMode) { "Auto" { "Automatic" } "Disabled" { "Disabled" } default { "Manual" } }
+         try { New-Service -Name $s.Name -BinaryPathName $s.PathName -DisplayName $s.DisplayName -StartupType $mode | Out-Null; Write-Host "Service bani: $($s.Name)" }
+         catch { Write-Host "Service banane me fail: $($s.Name) -> $_" }
+        }
+        if ($s.StartMode -eq "Auto") { $toStart += $s.Name }
+       }
+      }
+      foreach ($r in @(Get-ChildItem "$m\reg" -Filter "*.reg" -ErrorAction SilentlyContinue)) {
+       reg import $r.FullName 2>&1 | Out-Null
+      }
+      foreach ($n in $toStart) { try { Start-Service -Name $n -ErrorAction Stop } catch { Write-Host "Service start fail: $n" } }
+      if (Test-Path "$m\path.json") {
+       $np = @(Get-Content "$m\path.json" -Raw | ConvertFrom-Json)
+       $parts = @([Environment]::GetEnvironmentVariable("Path", "Machine") -split ';' | Where-Object { $_ })
+       foreach ($p in $np) { if ($p -and ($parts -notcontains $p)) { $parts += $p } }
+       [Environment]::SetEnvironmentVariable("Path", ($parts -join ';'), "Machine")
+      }
+      if (Test-Path "$m\env.json") {
+       $ev = Get-Content "$m\env.json" -Raw | ConvertFrom-Json
+       if ($ev) { foreach ($p in $ev.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, "$($p.Value)", "Machine") } }
+      }
+      Write-Host "Installed apps ka registry/services/PATH restore ho gaya."
+     }
+     Set-Content -Path "C:\apps-restored.flag" -Value "ok"
+     exit 0
+  - name: Shortcuts and Custom Startup Script
+    run: |
+     @'
+     $ErrorActionPreference = "Continue"
+     $desk = "C:\RDPData\Desktop"
+     New-Item -ItemType Directory -Force -Path $desk | Out-Null
+     $ws = New-Object -ComObject WScript.Shell
+     foreach ($d in $desk, "C:\Users\Public\Desktop") {
+      foreach ($pat in "Visual Studio Code*", "Antigravity*", "Codex*", "ChatGPT*", "Microsoft Edge*", "Firefox*", "Google Chrome*") {
+       Get-ChildItem $d -Filter "$pat.lnk" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+      }
+     }
+     $c = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+     if (-not (Test-Path $c)) { $c = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
+     if (Test-Path $c) {
+      $lnk = $ws.CreateShortcut("$desk\Google Chrome.lnk")
+      $lnk.TargetPath = $c
+      $lnk.WorkingDirectory = Split-Path $c
+      $lnk.Save()
+      Write-Host "Google Chrome: shortcut ban gaya"
+     } else { Write-Host "Chrome exe nahi mila, shortcut skip" }
+     exit 0
+     '@ | Set-Content -Path "C:\make-shortcuts.ps1"
+     & "C:\make-shortcuts.ps1"
+     # custom hook: C:\RDPData\startup.ps1 har start par chalega (machine-wide settings yahan daalo)
+     if (Test-Path "C:\RDPData\startup.ps1") {
+      Write-Host "Running C:\RDPData\startup.ps1"
+      try { & "C:\RDPData\startup.ps1" } catch { Write-Host "startup.ps1 fail: $_" }
+     }
+     exit 0
+  - name: Establish Tailscale Connection
+    run: |
+     $ErrorActionPreference = "Continue"
+     $ts   = "$env:ProgramFiles\Tailscale\tailscale.exe"
+     $host_name = "snck-rdp"
+     function Get-TsIp {
+      try {
+       $st = (cmd /c "`"$ts`" status --json 2>nul") | Out-String | ConvertFrom-Json
+       if ($st.BackendState -eq "Running" -and $st.TailscaleIPs) {
+        return @($st.TailscaleIPs | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' })[0]
+       }
+      } catch {}
+      return $null
+     }
+     $tsIP = $null
+     for ($i = 0; $i -lt 30 -and -not $tsIP; $i++) {
+      $tsIP = Get-TsIp
+      if (-not $tsIP) { Start-Sleep -Seconds 3 }
+     }
+     if ($tsIP) {
+      Write-Host "Saved Tailscale login se connect ho gaya. Same IP: $tsIP"
+     } else {
+      Write-Host "Saved login nahi chala, naya login link bana rahe hain..."
+      $out = "$env:TEMP\ts_out.txt"
+      $err = "$env:TEMP\ts_err.txt"
+      Remove-Item $out, $err -Force -ErrorAction SilentlyContinue
+      $p = Start-Process $ts -ArgumentList "up","--unattended","--reset","--hostname=$host_name" `
+      -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru
+      $link = $null
+      $text = ""
+      for ($i = 0; $i -lt 60 -and -not $link; $i++) {
+       Start-Sleep -Seconds 2
+       $text = "$(Get-Content $out -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $err -Raw -ErrorAction SilentlyContinue)"
+       if ($text -match 'https://login\.tailscale\.com/\S+') { $link = $Matches[0] }
+       elseif ($p.HasExited) { break }
+      }
+      if (-not $link) {
+       $tsIP = Get-TsIp
+       if (-not $tsIP) {
+        Write-Host "---- tailscale output ----"
+        Write-Host $text
+        exit 1
+       }
+      } else {
+       Write-Host "`n=============================="
+       Write-Host " TAILSCALE LOGIN LINK (isse kholo):"
+       Write-Host " $link"
+       Write-Host "==============================`n"
+       for ($i = 0; $i -lt 120 -and -not $tsIP; $i++) {
+        Start-Sleep -Seconds 5
+        $tsIP = Get-TsIp
+       }
+      }
+      if (-not $tsIP) { Write-Host "Login nahi hua, Tailscale IP nahi mila"; exit 1 }
+     }
+     echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+     Start-Sleep -Seconds 2
+     if (Test-Path "C:\save-ts.ps1") { & "C:\save-ts.ps1" }
+     exit 0
+  - name: Verify RDP Accessibility
+    run: |
+     Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+     $ok = $false
+     for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
+      $ok = (Test-NetConnection -ComputerName 127.0.0.1 -Port 3389 -WarningAction SilentlyContinue).TcpTestSucceeded
+      if (-not $ok) { Start-Sleep -Seconds 3 }
+     }
+     if (-not $ok) {
+      Write-Error "RDP port 3389 not listening"
+      exit 1
+     }
+     Write-Host "RDP port 3389 up!"
+  - name: Make Sure Chrome Is Installed (background)
+    run: |
+     @'
+     $ErrorActionPreference = "Continue"
+     function Log($m) { "[$(Get-Date -Format T)] $m" | Add-Content "C:\bg-install.log" }
+     $c64 = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+     $c32 = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+     if ((Test-Path $c64) -or (Test-Path $c32)) { Log "Chrome already present, skip" }
+     else {
+      Log "installing chrome"
+      choco install googlechrome -y --no-progress 2>&1 | Out-File "C:\bg-choco-chrome.log"
+      Log "chrome exit: $LASTEXITCODE"
+     }
+     & "C:\make-shortcuts.ps1" | Out-Null
+     Log "bg install done"
+     '@ | Set-Content -Path "C:\bg-install.ps1"
+     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\bg-install.ps1"
+     Write-Host "Chrome check background me shuru, RDP ready hai."
+  - name: Maintain Connection
+    timeout-minutes: 340
+    run: |
+     Write-Host "`n=== RDP ACCESS ==="
+     Write-Host "Address: $env:TAILSCALE_IP"
+     Write-Host "Username: $env:RDP_USER"
+     Write-Host "Password: $env:RDP_PASS"
+     Write-Host "==================`n"
+     $n = 0
+     while ($true) {
+      Write-Host "[$(Get-Date)] RDP Active"
+      if (($n -lt 15) -and (Test-Path "C:\bg-install.log")) { Get-Content "C:\bg-install.log" -Tail 2 | ForEach-Object { Write-Host "  bg: $_" } }
+      Start-Sleep -Seconds 60
+      $n++
+      if (Test-Path "C:\RDPData\Desktop\save-now.txt") {
+       Remove-Item "C:\RDPData\Desktop\save-now.txt" -Force -ErrorAction SilentlyContinue
+       Write-Host "save-now.txt mila, abhi full save kar rahe hain"
+       if (Test-Path "C:\save-apps.ps1") { & "C:\save-apps.ps1" }
+       & "C:\save-data.ps1"
+      }
+      if ($n % 2 -eq 0 -and (Test-Path "C:\save-apps.ps1")) { & "C:\save-apps.ps1" }
+      if ($n % 5 -eq 0) { & "C:\save-data.ps1" }
+     }
+  - name: Final Save (cancel par bhi chalega)
+    if: always()
+    run: |
+     $names = "chrome","msedge","firefox","brave","opera","vivaldi","Code","Antigravity","Discord","DiscordPTB","DiscordCanary","Update","Telegram","Spotify","slack","notepad++","Unity Hub","Unity"
+     Get-Process -Name $names -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+     foreach ($n in $names) { taskkill /IM "$n.exe" 2>&1 | Out-Null }
+     Start-Sleep -Seconds 12
+     Get-Process -Name $names -ErrorAction SilentlyContinue | Stop-Process -Force
+     Start-Sleep -Seconds 2
+     if (Test-Path "C:\save-apps.ps1") { & "C:\save-apps.ps1" }
+     if (Test-Path "C:\save-data.ps1") { & "C:\save-data.ps1" }
+     exit 0
+  - name: Auto Restart (Final Save ke baad naya run)
+    if: ${{ !cancelled() }}
+    run: |
+     Write-Host "Final Save ho gaya, naya run trigger kar rahe hain..."
+     gh workflow run snck.yml --repo $env:GITHUB_REPOSITORY --ref $env:GITHUB_REF_NAME
+     if ($LASTEXITCODE -eq 0) { Write-Host "Naya run queue ho gaya (purana khatam hote hi shuru hoga)." }
+     else { Write-Host "Auto restart fail, manually Run workflow dabana padega" }
+     exit 0
